@@ -1,0 +1,4 @@
+*.exe
+Foxhole-*
+*.conf
+go.sum
