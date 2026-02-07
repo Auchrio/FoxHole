@@ -25,9 +25,12 @@ const (
 var (
 	Secret = "super-secret-key"
 	relays = []string{"wss://relay.damus.io", "wss://nos.lol"}
-	sk     string
-	pk     string
 )
+
+func init() {
+	cfg := LoadConfig()
+	Secret = cfg.Secret
+}
 
 // deriveKey creates AES key from ID and secret
 func deriveKey(id string) []byte {
@@ -45,8 +48,8 @@ func encrypt(text string, key []byte) (string, error) {
 }
 
 // decrypt using AES-256-GCM
-func decrypt(hex_data string, key []byte) (string, error) {
-	d, err := hex.DecodeString(hex_data)
+func decrypt(hexData string, key []byte) (string, error) {
+	d, err := hex.DecodeString(hexData)
 	if err != nil {
 		return "", err
 	}
@@ -61,139 +64,7 @@ func decrypt(hex_data string, key []byte) (string, error) {
 	return string(p), err
 }
 
-// ReadMessages retrieves latest message
-func ReadMessages(id string) error {
-	key := deriveKey(id)
-	tag := hex.EncodeToString(key)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	msgs := make([]*nostr.Event, 0, historyLimit)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	for _, url := range relays {
-		wg.Add(1)
-		go func(u string) {
-			defer wg.Done()
-			r, err := nostr.RelayConnect(ctx, u)
-			if err != nil {
-				return
-			}
-			defer r.Close()
-
-			sub, _ := r.Subscribe(ctx, []nostr.Filter{{
-				Tags:  nostr.TagMap{"t": []string{tag}},
-				Kinds: []int{nostr.KindTextNote},
-				Limit: historyLimit,
-			}})
-
-			tm := time.After(300 * time.Millisecond)
-			for {
-				select {
-				case ev := <-sub.Events:
-					mu.Lock()
-					msgs = append(msgs, ev)
-					mu.Unlock()
-					return
-				case <-tm:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}(url)
-	}
-	wg.Wait()
-
-	if len(msgs) == 0 {
-		return fmt.Errorf("no messages")
-	}
-
-	sort.Slice(msgs, func(i, j int) bool {
-		return msgs[i].CreatedAt < msgs[j].CreatedAt
-	})
-
-	m, err := decrypt(msgs[len(msgs)-1].Content, key)
-	if err != nil {
-		return err
-	}
-	fmt.Print(m)
-	return nil
-}
-
-// ListenMessages waits for new message with timeout
-func ListenMessages(id string, timeoutSec int) error {
-	key := deriveKey(id)
-	tag := hex.EncodeToString(key)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sk := nostr.GeneratePrivateKey()
-	pk, _ := nostr.GetPublicKey(sk)
-
-	found := false
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-
-	for _, url := range relays {
-		wg.Add(1)
-		go func(u string) {
-			defer wg.Done()
-			if found {
-				return
-			}
-
-			r, err := nostr.RelayConnect(ctx, u)
-			if err != nil {
-				return
-			}
-			defer r.Close()
-
-			now := nostr.Now()
-			sub, _ := r.Subscribe(ctx, []nostr.Filter{{
-				Tags:  nostr.TagMap{"t": []string{tag}},
-				Kinds: []int{nostr.KindTextNote},
-				Since: &now,
-			}})
-
-			for ev := range sub.Events {
-				if ev.PubKey != pk {
-					m, err := decrypt(ev.Content, key)
-					if err == nil {
-						fmt.Print(m)
-						found = true
-						close(done)
-						cancel()
-						return
-					}
-				}
-			}
-		}(url)
-	}
-
-	go func() {
-		wg.Wait()
-		if !found {
-			close(done)
-		}
-	}()
-
-	if timeoutSec == 0 {
-		// Wait indefinitely
-		<-done
-		return nil
-	}
-
-	select {
-	case <-done:
-		return nil
-	case <-time.After(time.Duration(timeoutSec) * time.Second):
-		return fmt.Errorf("timeout")
-	}
-}
-
-// SendMessage sends encrypted message
+// SendMessage sends encrypted message via Nostr
 func SendMessage(id, text string) error {
 	key := deriveKey(id)
 	tag := hex.EncodeToString(key)
@@ -242,6 +113,140 @@ func SendMessage(id, text string) error {
 		return fmt.Errorf("publish failed")
 	}
 
-	fmt.Print("OK")
 	return nil
+}
+
+// ReadMessages retrieves latest message for an ID
+func ReadMessages(id string) (string, error) {
+	key := deriveKey(id)
+	tag := hex.EncodeToString(key)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	msgs := make([]*nostr.Event, 0, historyLimit)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, url := range relays {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			r, err := nostr.RelayConnect(ctx, u)
+			if err != nil {
+				return
+			}
+			defer r.Close()
+
+			sub, _ := r.Subscribe(ctx, []nostr.Filter{{
+				Tags:  nostr.TagMap{"t": []string{tag}},
+				Kinds: []int{nostr.KindTextNote},
+				Limit: historyLimit,
+			}})
+
+			tm := time.After(300 * time.Millisecond)
+			for {
+				select {
+				case ev := <-sub.Events:
+					mu.Lock()
+					msgs = append(msgs, ev)
+					mu.Unlock()
+					return
+				case <-tm:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(url)
+	}
+	wg.Wait()
+
+	if len(msgs) == 0 {
+		return "", fmt.Errorf("no messages")
+	}
+
+	sort.Slice(msgs, func(i, j int) bool {
+		return msgs[i].CreatedAt < msgs[j].CreatedAt
+	})
+
+	m, err := decrypt(msgs[len(msgs)-1].Content, key)
+	if err != nil {
+		return "", err
+	}
+	return m, nil
+}
+
+// ListenMessages waits for new message with timeout
+func ListenMessages(id string, timeoutSec int) (string, error) {
+	key := deriveKey(id)
+	tag := hex.EncodeToString(key)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+
+	found := false
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	var result string
+	var resultMu sync.Mutex
+
+	for _, url := range relays {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			if found {
+				return
+			}
+
+			r, err := nostr.RelayConnect(ctx, u)
+			if err != nil {
+				return
+			}
+			defer r.Close()
+
+			now := nostr.Now()
+			sub, _ := r.Subscribe(ctx, []nostr.Filter{{
+				Tags:  nostr.TagMap{"t": []string{tag}},
+				Kinds: []int{nostr.KindTextNote},
+				Since: &now,
+			}})
+
+			for ev := range sub.Events {
+				if ev.PubKey != pk {
+					m, err := decrypt(ev.Content, key)
+					if err == nil {
+						resultMu.Lock()
+						result = m
+						resultMu.Unlock()
+						found = true
+						close(done)
+						cancel()
+						return
+					}
+				}
+			}
+		}(url)
+	}
+
+	go func() {
+		wg.Wait()
+		if !found {
+			close(done)
+		}
+	}()
+
+	if timeoutSec == 0 {
+		// Wait indefinitely
+		<-done
+		return result, nil
+	}
+
+	select {
+	case <-done:
+		return result, nil
+	case <-time.After(time.Duration(timeoutSec) * time.Second):
+		return "", fmt.Errorf("timeout")
+	}
 }
