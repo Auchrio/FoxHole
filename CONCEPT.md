@@ -10,7 +10,7 @@ These devices combined lead to a per-device cost of around USD$16-20, which is v
 
 ## Software
 On the device itself, it should have the following capabilities:
-- Listen for a message from the connecting device to initiate DNS hole punching via the [pulse tool](https://github.com/Auchrio/pulse)
+- Listen for a message from the connecting device to initiate DNS hole punching via the [pulse tool](https://github.com/Auchrio/pulse) and [cloudflared temporary tunnel](https://github.com/cloudflare/cloudflared)
 - Host a WireGuard VPN that forwards traffic through its local network, making the connecting device appear to be at the device's location via [wireguard-linux-compat](https://github.com/WireGuard/wireguard-linux-compat) or [wireguard-go](https://github.com/WireGuard/wireguard-go)
 - Employ multiple connection recovery methods if WiFi signal is lost:
     - Attempt to connect to nearby open WiFi networks (using a simple Go program)
